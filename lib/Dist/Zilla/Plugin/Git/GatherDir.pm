@@ -3,6 +3,7 @@ package Dist::Zilla::Plugin::Git::GatherDir;
 use Moose;
 use Moose::Autobox;
 use MooseX::Types::Path::Class qw(Dir File);
+use List::MoreUtils 'uniq';
 with 'Dist::Zilla::Role::Git::Repo';
 extends 'Dist::Zilla::Plugin::GatherDir';
 
