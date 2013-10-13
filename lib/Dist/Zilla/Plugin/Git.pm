@@ -13,7 +13,7 @@ __END__
 =head1 DESCRIPTION
 
 This set of plugins for L<Dist::Zilla> can do interesting things for
-module authors using L<git|http://git- scm.com> to track their work. The
+module authors using Git (L<http://git-scm.com>) to track their work. The
 following plugins are provided in this distribution:
 
 =over 4
@@ -23,6 +23,8 @@ following plugins are provided in this distribution:
 =item * L<Dist::Zilla::Plugin::Git::Commit>
 
 =item * L<Dist::Zilla::Plugin::Git::CommitBuild>
+
+=item * L<Dist::Zilla::Plugin::Git::GatherDir>
 
 =item * L<Dist::Zilla::Plugin::Git::Init>
 
@@ -37,6 +39,8 @@ following plugins are provided in this distribution:
 A L<Dist::Zilla::PluginBundle::Git> bundle is also provided for your
 convenience, check its documentation to see which plugins it will load.
 
+You need Git 1.5.4 or later to use these plugins.  Some plugins
+require a more recent version of Git for certain features.
 
 
 =head1 SEE ALSO

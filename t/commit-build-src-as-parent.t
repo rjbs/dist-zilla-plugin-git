@@ -8,17 +8,18 @@ use Dist::Zilla::Tester;
 use File::Temp qw{ tempdir };
 use Git::Wrapper;
 use Path::Class;
-use Test::More   tests => 6;
+use Test::More   tests => 8;
+use Try::Tiny qw(try);
 use Cwd qw(cwd);
 
 # Mock HOME to avoid ~/.gitexcludes from causing problems
 $ENV{HOME} = tempdir( CLEANUP => 1 );
 
+my $corpus_dir = dir('corpus/commit-build-src-as-parent')->absolute;
+
 my $cwd = cwd();
-END { chdir $cwd if $cwd }
-my $zilla = Dist::Zilla::Tester->from_config({
-  dist_root => dir('corpus/commit-build')->absolute,
-});
+END { chdir $cwd if $cwd };
+my $zilla = Dist::Zilla::Tester->from_config({ dist_root => $corpus_dir, });
 
 # build fake repository
 chdir $zilla->tempdir->subdir('source');
@@ -33,10 +34,15 @@ $git->commit( { message => 'initial commit' } );
 $zilla->build;
 ok( $git->rev_parse('-q', '--verify', 'refs/heads/build/master'), 'source repo has the "build/master" branch')
     or diag $git->branch;
-is( scalar $git->log('build/master'), 1, 'one commit on the build/master branch')
+is( scalar $git->log('build/master'), 2, 'two commit on the build/master branch')
     or diag $git->branch;
 is( scalar $git->ls_tree('build/master'), 2, 'two files in latest commit on the build/master branch')
     or diag $git->branch;
+
+my @log = $git->log('build/master');
+
+like try {$log[1]->message} => qr/initial commit/, 'master is a parent';
+like try {$log[0]->message} => qr/Build results of \w+ \(on master\)/, 'build commit';
 
 chdir $cwd;
 
@@ -78,7 +84,7 @@ $git3->reset('--hard','origin/master');
 append_to_file('dist.ini', "\n\n");
 $git3->commit('-a', '-m', 'commit on master');
 $zilla3->build;
-is( scalar $git3->log('build/master'), 2, 'two commits on the build/master branch')
+is( scalar $git3->log('build/master'), 3, 'three commits on the build/master branch')
     or diag $git3->branch;
 is( scalar $git->ls_tree('build/master'), 2, 'two files in latest commit on the build/master branch')
     or diag $git->branch;

@@ -5,8 +5,9 @@ use warnings;
 package Dist::Zilla::Plugin::Git::Commit;
 # ABSTRACT: commit dirty files
 
+use namespace::autoclean;
 use File::Temp           qw{ tempfile };
-use Git::Wrapper;
+use List::Util           qw{ first };
 use Moose;
 use MooseX::Has::Sugar;
 use MooseX::Types::Moose qw{ Str };
@@ -29,8 +30,8 @@ use String::Formatter method_stringf => {
 };
 
 with 'Dist::Zilla::Role::AfterRelease';
-with 'Dist::Zilla::Role::Git::DirtyFiles';
 with 'Dist::Zilla::Role::Git::Repo';
+with 'Dist::Zilla::Role::Git::DirtyFiles';
 
 # -- attributes
 
@@ -45,7 +46,7 @@ sub mvp_multivalue_args { qw( add_files_in ) }
 sub after_release {
     my $self = shift;
 
-    my $git  = Git::Wrapper->new( $self->repo_root );
+    my $git  = $self->git;
     my @output;
 
     # check if there are dirty files that need to be committed.
@@ -68,7 +69,7 @@ sub after_release {
     }
 
     # if nothing to commit, we're done!
-    return unless @output;    
+    return unless @output;
 
     # write commit message in a temp file
     my ($fh, $filename) = tempfile( getcwd . '/DZP-git.XXXX', UNLINK => 1 );
@@ -101,17 +102,29 @@ sub _get_changes {
     my $self = shift;
 
     # parse changelog to find commit message
-    my $changelog = Dist::Zilla::File::OnDisk->new( { name => $self->changelog } );
+    my $cl_name   = $self->changelog;
+    my $changelog = first { $_->name eq $cl_name } @{ $self->zilla->files };
+    unless ($changelog) {
+      $self->log("WARNING: Unable to find $cl_name");
+      return '';
+    }
     my $newver    = $self->zilla->version;
-    my @content   =
-        grep { /^$newver(?:\s+|$)/ ... /^\S/ } # from newver to un-indented
-        split /\n/, $changelog->content;
-    shift @content; # drop the version line
-    # drop unindented last line and trailing blank lines
-    pop @content while ( @content && $content[-1] =~ /^(?:\S|\s*$)/ );
+    $changelog->content =~ /
+      ^\Q$newver\E(?![_.]*[0-9]).*\n # from line beginning with version number
+      ( (?: (?> .* ) (?:\n|\z) )*? ) # capture as few lines as possible
+      (?: (?> \s* ) ^\S | \z )       # until non-indented line or EOF
+    /xm or do {
+      $self->log("WARNING: Unable to find $newver in $cl_name");
+      return '';
+    };
+
+    (my $changes = $1) =~ s/^\s*\n//; # Remove leading blank lines
+
+    $self->log("WARNING: No changes listed under $newver in $cl_name")
+        unless length $changes;
 
     # return commit message
-    return join("\n", @content, ''); # add a final \n
+    return $changes;
 } # end _get_changes
 
 
@@ -135,8 +148,14 @@ In your F<dist.ini>:
 Once the release is done, this plugin will record this fact in git by
 committing changelog and F<dist.ini>. The commit message will be taken
 from the changelog for this release.  It will include lines between
-the current version and timestamp and the next non-indented line.
+the current version and timestamp and the next non-indented line,
+except that blank lines at the beginning or end are removed.
 
+B<Warning:> If you are using Git::Commit in conjunction with the
+L<NextRelease|Dist::Zilla::Plugin::NextRelease> plugin,
+C<[NextRelease]> must come before C<[Git::Commit]> (or C<[@Git]>) in
+your F<dist.ini> or plugin bundle.  Otherwise, Git::Commit will commit
+the F<Changes> file before NextRelease has updated it.
 
 The plugin accepts the following options:
 
@@ -147,6 +166,9 @@ The plugin accepts the following options:
 =item * allow_dirty - a file that will be checked in if it is locally
 modified.  This option may appear multiple times.  The default
 list is F<dist.ini> and the changelog file given by C<changelog>.
+
+=item * allow_dirty_match - works the same as allow_dirty, but
+matching as a regular expression instead of an exact filename.
 
 =item * add_files_in - a path that will have its new files checked in.
 This option may appear multiple times. This is used to add files
@@ -171,6 +193,9 @@ You can use the following codes in commit_msg:
 =item C<%c>
 
 The list of changes in the just-released version (read from C<changelog>).
+It will include lines between the current version and timestamp and
+the next non-indented line, except that blank lines at the beginning
+or end are removed.  It normally ends in a newline.
 
 =item C<%{dd-MMM-yyyy}d>
 

@@ -4,6 +4,7 @@ use Moose;
 use Moose::Autobox;
 use MooseX::Types::Path::Class qw(Dir File);
 with 'Dist::Zilla::Role::Git::Repo';
+use Dist::Zilla::Plugin::GatherDir 4.200016 (); # exclude_match
 extends 'Dist::Zilla::Plugin::GatherDir';
 
 =head1 DESCRIPTION
@@ -33,9 +34,6 @@ files into a subdir of your dist, you might write:
 
 =cut
 
-use Git::Wrapper;
-use File::Find::Rule;
-use File::HomeDir;
 use File::Spec;
 use List::AllUtils qw(uniq);
 use Path::Class;
@@ -60,11 +58,38 @@ both for files and for directories relative to the C<root>.
 
 In almost all cases, the default value (false) is correct.
 
+=attr include_untracked
+
+By default, files not tracked by Git will not be gathered.  If this is
+set to a true value, then untracked files not covered by a Git ignore
+pattern (i.e. those reported by C<git ls-files -o --exclude-standard>)
+are also gathered (and you'll probably want to use
+L<Git::Check|Dist::Zilla::Plugin::Git::Check> to ensure all files are
+checked in before a release).
+
+C<include_untracked> requires at least Git 1.5.4, but you should
+probably not use it if your Git is older than 1.6.5.2.  Versions
+before that would not list files matched by your F<.gitignore>, even
+if they were already being tracked by Git (which means they will not
+be gathered, even though they should be).  Whether that is a problem
+depends on the contents of your exclude files (including the global
+one, if any).
+
 =attr follow_symlinks
 
-By default, directories that are symlinks will not be followed. Note on the
-other hand that in all followed directories, files which are symlinks are
-always gathered.
+Git::GatherDir does not honor GatherDir's
+L<follow_symlinks|Dist::Zilla::Plugin::GatherDir/follow_symlinks>
+option.  While the attribute exists (because Git::GatherDir is a
+subclass), setting it has no effect.
+
+Directories that are symlinks will not be gathered.  Instead, you'll
+get a message saying C<WARNING: %s is symlink to directory, skipping it>.
+To suppress the warning, add that directory to C<exclude_filename> or
+C<exclude_match>.  To gather the files in the symlinked directory, use
+a second instance of GatherDir or Git::GatherDir with appropriate
+C<root> and C<prefix> options.
+
+Files which are symlinks are always gathered.
 
 =attr exclude_filename
 
@@ -79,19 +104,34 @@ multiple times to specify multiple patterns to exclude.
 
 =cut
 
+has include_untracked => (
+  is  => 'ro',
+  isa => 'Bool',
+  default => 0,
+);
 
 override gather_files => sub {
   my ($self) = @_;
 
+  require Git::Wrapper;
+
   my $root = "" . $self->root;
-  $root =~ s{^~([\\/])}{File::HomeDir->my_home . $1}e;
+  $root =~ s{^~([\\/])}{require File::HomeDir; File::HomeDir->my_home . $1}e;
   $root = Path::Class::dir($root);
 
-  my $git = Git::Wrapper->new($root);
+  my $git = Git::Wrapper->new("$root");
+
+  my @opts;
+  @opts = qw(--cached --others --exclude-standard) if $self->include_untracked;
+
+  my $exclude_regex = qr/\000/;
+  $exclude_regex = qr/$exclude_regex|$_/
+    for ($self->exclude_match->flatten);
+
+  my %is_excluded = map {; $_ => 1 } $self->exclude_filename->flatten;
 
   my @files;
-  FILE: for my $filename (uniq $git->ls_files) {
-
+  FILE: for my $filename (uniq $git->ls_files(@opts)) {
     my $file = file($filename)->relative($root);
 
     unless ($self->include_dotfiles) {
@@ -99,13 +139,13 @@ override gather_files => sub {
       next FILE if grep { /^\.[^.]/ } $file->dir->dir_list;
     }
 
-    my $exclude_regex = qr/\000/;
-    $exclude_regex = qr/$exclude_regex|$_/
-      for ($self->exclude_match->flatten);
-    # \b\Q$_\E\b should also handle the `eq` check
-    $exclude_regex = qr/$exclude_regex|\b\Q$_\E\b/
-      for ($self->exclude_filename->flatten);
     next if $file =~ $exclude_regex;
+    next if $is_excluded{ $file };
+
+    if (-d $file) {
+      $self->log("WARNING: $file is symlink to directory, skipping it");
+      next;
+    }
 
     push @files, $self->_file_from_filename($filename);
   }

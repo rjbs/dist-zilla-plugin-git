@@ -29,6 +29,12 @@ has commit_message => (
     default => 'initial commit',
 );
 
+has commit => (
+    is      => 'ro',
+    isa     => 'Bool',
+    default => 1,
+);
+
 has remotes => (
   is   => 'ro',
   isa  => 'ArrayRef[Str]',
@@ -47,7 +53,7 @@ sub mvp_aliases { return { config => 'config_entries', remote => 'remotes' } }
 sub after_mint {
     my $self = shift;
     my ($opts) = @_;
-    my $git = Git::Wrapper->new($opts->{mint_root});
+    my $git = Git::Wrapper->new("$opts->{mint_root}");
     $self->log("Initializing a new git repository in " . $opts->{mint_root});
     $git->init;
 
@@ -57,8 +63,9 @@ sub after_mint {
       $git->config($option, $value);
     }
 
-    $git->add($opts->{mint_root});
-    $git->commit({message => _format_string($self->commit_message, $self)});
+    $git->add("$opts->{mint_root}");
+    $git->commit({message => _format_string($self->commit_message, $self)})
+      if $self->commit;
     foreach my $remoteSpec (@{ $self->remotes }) {
       my ($remote, $url) = split ' ', _format_string($remoteSpec, $self), 2;
       $self->log_debug("Adding remote $remote as $url");
@@ -79,6 +86,7 @@ In your F<profile.ini>:
 
     [Git::Init]
     commit_message = initial commit  ; this is the default
+    commit = 1                       ; this is the default
     remote = origin git@github.com:USERNAME/%{lc}N.git ; no default
     config = user.email USERID@cpan.org  ; there is no default
 
@@ -96,6 +104,10 @@ The plugin accepts the following options:
 
 =item * commit_message - the commit message to use when checking in
 the newly-minted dist. Defaults to C<initial commit>.
+
+=item * commit - if true (the default), commit the newly-minted dist.
+If set to a false value, add the files to the Git index but don't
+actually make a commit.
 
 =item * config - a config setting to make in the repository.  No
 config entries are made by default.  A setting is specified as
