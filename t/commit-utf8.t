@@ -2,13 +2,17 @@
 
 use strict;
 use warnings;
+use utf8;
 
 use Dist::Zilla  1.093250;
 use Dist::Zilla::Tester;
+use Encode qw( decode );
 use File::pushd qw(pushd);
 use Path::Tiny 0.012 qw(path); # cwd
-use lib 't/lib';
-use Test::More   tests => 3;
+use Test::More;
+
+plan skip_all => "Dist::Zilla 5 required" if Dist::Zilla->VERSION < 5;
+plan tests => 1;
 
 use t::Util qw(clean_environment init_repo);
 
@@ -16,13 +20,30 @@ use t::Util qw(clean_environment init_repo);
 # and clear GIT_ environment variables
 my $homedir = clean_environment;
 
+# UTF-8 encoded strings:
+my $changes1 = 'Ævar Arnfjörð Bjarmason';
+my $changes2 = 'ブログの情報';
+my $changes3 = 'plain ASCII';
+
 # build fake repository
 my $zilla = Dist::Zilla::Tester->from_config({
-  dist_root => path('corpus/commit-dirtydir')->absolute,
+  dist_root => path('corpus/commit')->absolute,
+},{
+  add_files => {
+    'source/Changes' => <<"END CHANGES",
+Changes
+
+1.23 2012-11-10 19:15:45 CET
+ - $changes1
+ - $changes2
+ - $changes3
+END CHANGES
+  },
 });
 
 {
   my $dir = pushd(path($zilla->tempdir)->child('source'));
+
   my $git = init_repo( qw{ .  dist.ini Changes } );
 
   # do a release, with changes and dist.ini updated
@@ -32,16 +53,7 @@ my $zilla = Dist::Zilla::Tester->from_config({
 
   # check if dist.ini and changelog have been committed
   my ($log) = $git->log( 'HEAD' );
-  like( $log->message, qr/v1.23\n[^a-z]*foo[^a-z]*bar[^a-z]*baz/, 'commit message taken from changelog' );
-
-  # check if we committed our tarball
-  my @files = $git->ls_files( { cached => 1 } );
-  ok( ( grep { $_ =~ /releases/ } @files ), "We committed the tarball" );
-
-  # We should have no dirty files uncommitted
-  # ignore the "DZP-git.9y5u" temp file, ha!
-  @files = $git->ls_files( { others => 1, modified => 1, unmerged => 1 } );
-  ok( @files == 1, "No untracked files left" );
+  like( decode('UTF-8', $log->message), qr/v1.23\n[^a-z]*\Q$changes1\E[^a-z]*\Q$changes2\E[^a-z]*\Q$changes3\E/, 'commit message taken from changelog' );
 }
 
 sub append_to_file {
@@ -50,4 +62,3 @@ sub append_to_file {
     print $fh @lines;
     close $fh;
 }
-

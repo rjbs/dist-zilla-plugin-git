@@ -5,6 +5,7 @@ use warnings;
 package Dist::Zilla::Plugin::Git::Init;
 # ABSTRACT: initialize git repository on dzil new
 
+
 our %transform = (
   lc => sub { lc shift },
   uc => sub { uc shift },
@@ -21,23 +22,36 @@ use String::Formatter method_stringf => {
   },
 };
 
+use MooseX::Types::Moose qw(Str Bool ArrayRef);
 with 'Dist::Zilla::Role::AfterMint';
 
 has commit_message => (
     is      => 'ro',
-    isa     => 'Str',
+    isa     => Str,
     default => 'initial commit',
+);
+
+has commit => (
+    is      => 'ro',
+    isa     => Bool,
+    default => 1,
+);
+
+has branch => (
+    is      => 'ro',
+    isa     => Str,
+    default => '',
 );
 
 has remotes => (
   is   => 'ro',
-  isa  => 'ArrayRef[Str]',
+  isa  => ArrayRef[Str],
   default => sub { [] },
 );
 
 has config_entries => (
   is   => 'ro',
-  isa  => 'ArrayRef[Str]',
+  isa  => ArrayRef[Str],
   default => sub { [] },
 );
 
@@ -47,7 +61,7 @@ sub mvp_aliases { return { config => 'config_entries', remote => 'remotes' } }
 sub after_mint {
     my $self = shift;
     my ($opts) = @_;
-    my $git = Git::Wrapper->new($opts->{mint_root});
+    my $git = Git::Wrapper->new("$opts->{mint_root}");
     $self->log("Initializing a new git repository in " . $opts->{mint_root});
     $git->init;
 
@@ -57,8 +71,16 @@ sub after_mint {
       $git->config($option, $value);
     }
 
-    $git->add($opts->{mint_root});
-    $git->commit({message => _format_string($self->commit_message, $self)});
+    $git->add("$opts->{mint_root}");
+    if ($self->commit) {
+      my $message = 'Made initial commit';
+      if (length $self->branch) {
+        $git->checkout('-b', $self->branch);
+        $message .= ' on branch ' . $self->branch;
+      }
+      $git->commit({message => _format_string($self->commit_message, $self)});
+      $self->log($message);
+    }
     foreach my $remoteSpec (@{ $self->remotes }) {
       my ($remote, $url) = split ' ', _format_string($remoteSpec, $self), 2;
       $self->log_debug("Adding remote $remote as $url");
@@ -79,6 +101,8 @@ In your F<profile.ini>:
 
     [Git::Init]
     commit_message = initial commit  ; this is the default
+    commit = 1                       ; this is the default
+    branch =                         ; this is the default (means master)
     remote = origin git@github.com:USERNAME/%{lc}N.git ; no default
     config = user.email USERID@cpan.org  ; there is no default
 
@@ -96,6 +120,14 @@ The plugin accepts the following options:
 
 =item * commit_message - the commit message to use when checking in
 the newly-minted dist. Defaults to C<initial commit>.
+
+=item * commit - if true (the default), commit the newly-minted dist.
+If set to a false value, add the files to the Git index but don't
+actually make a commit.
+
+=item * branch - the branch name under which the newly-minted dist is checked
+in (if C<commit> is true). Defaults to an empty string, which means that
+the Git default branch is used (master).
 
 =item * config - a config setting to make in the repository.  No
 config entries are made by default.  A setting is specified as

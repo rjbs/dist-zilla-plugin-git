@@ -4,28 +4,34 @@ use strict;
 use warnings;
 
 use Git::Wrapper;
+use Path::Tiny qw(path);
 use Test::More 0.88;            # done_testing
 use Test::Fatal qw(exception);
 
+use Devel::SimpleTrace;
+
 use t::Util;
+
+eval { require Dist::Zilla::Plugin::Config::Git };
+plan skip_all => 'Dist::Zilla::Plugin::Config::Git not installed'
+    if $@ and $@ !~ /^Can't locate /;
 
 # rt#56485 - skip test to avoid failures for old git versions
 skip_unless_git_version('1.7.0');
 
 plan tests => 7;
 
-init_test(corpus => 'push');
+init_test(corpus => 'push-gitconfig');
 
 $git->add( qw{ dist.ini Changes } );
 $git->commit( { message => 'initial commit' } );
 
-# create a clone, and use it to set up origin
+# create a clone, and use it to set up 'genesis'
 my $clone = $base_dir->child('clone');
 $git->clone( { quiet=>1, 'no-checkout'=>1, bare=>1 }, "$git_dir", "$clone" );
-$git->remote('add', 'origin', "$clone");
-$git->config('branch.master.remote', 'origin');
+$git->remote('add', 'genesis', "$clone");
+$git->config('branch.master.remote', 'genesis');
 $git->config('branch.master.merge', 'refs/heads/master');
-$git->config('push.default', 'nothing');
 
 # do the release
 append_to_file('Changes',  "\n");
@@ -36,7 +42,7 @@ $zilla->release;
 
 # Check log
 zilla_log_is('Git::Push', <<'');
-[Git::Push] pushing to origin
+[Git::Push] pushing to genesis master:master
 
 # check if everything was pushed
 $git = Git::Wrapper->new( "$clone" );
@@ -50,7 +56,6 @@ is( $tags[0], 'v1.23', 'new tag created after new version' );
 
 # try a release with a bogus remote
 append_to_file('dist.ini', <<'END dist.ini');
-push_to = origin
 push_to = bogus unmodified
 END dist.ini
 
@@ -63,7 +68,7 @@ zilla_log_is('Git::Push', <<'');
 [Git::Push] These remotes do not exist: bogus
 
 is_deeply($zilla->plugin_named('Git::Push')->push_to,
-          [ 'origin', 'bogus unmodified' ],
-          "push_to is not modified");
+          [ 'bogus unmodified' ],
+          "git_config->push_to is overridden");
 
 done_testing;

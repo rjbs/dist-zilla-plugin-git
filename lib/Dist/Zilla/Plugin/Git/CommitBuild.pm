@@ -5,7 +5,8 @@ use warnings;
 package Dist::Zilla::Plugin::Git::CommitBuild;
 # ABSTRACT: checkin build results on separate branch
 
-use Git::Wrapper 0.021;
+
+use Git::Wrapper 0.021 ();      # need -STDIN
 use IPC::Open3;
 use IPC::System::Simple; # required for Fatalised/autodying system
 use File::chdir;
@@ -13,11 +14,10 @@ use File::Spec::Functions qw/ rel2abs catfile /;
 use File::Temp;
 use Moose;
 use namespace::autoclean;
-use MooseX::AttributeShortcuts;
-use Path::Class;
-use MooseX::Types::Path::Class ':all';
+use Path::Tiny qw();
+use MooseX::Types::Path::Tiny qw( Path );
 use MooseX::Has::Sugar;
-use MooseX::Types::Moose qw{ Str };
+use MooseX::Types::Moose qw{ Str Bool };
 use Cwd qw(abs_path);
 use Try::Tiny;
 
@@ -25,15 +25,15 @@ use String::Formatter (
 	method_stringf => {
 		-as   => '_format_branch',
 		codes => {
-			b => sub { (shift->name_rev( '--name-only', 'HEAD' ))[0] },
+			b => sub { shift->_source_branch },
 		},
 	},
 	method_stringf => {
 		-as   => '_format_message',
 		codes => {
-			b => sub { (shift->_git->name_rev( '--name-only', 'HEAD' ))[0] },
-			h => sub { (shift->_git->rev_parse( '--short',    'HEAD' ))[0] },
-			H => sub { (shift->_git->rev_parse('HEAD'))[0] },
+			b => sub { shift->_source_branch },
+			h => sub { (shift->git->rev_parse( '--short',    'HEAD' ))[0] },
+			H => sub { (shift->git->rev_parse('HEAD'))[0] },
 		    t => sub { shift->zilla->is_trial ? '-TRIAL' : '' },
 		    v => sub { shift->zilla->version },
 		}
@@ -43,8 +43,9 @@ use String::Formatter (
 # debugging...
 #use Smart::Comments '###';
 
-with 'Dist::Zilla::Role::AfterBuild', 'Dist::Zilla::Role::AfterRelease';
-with 'Dist::Zilla::Role::Git::Repo';
+with 'Dist::Zilla::Role::AfterBuild',
+    'Dist::Zilla::Role::AfterRelease',
+    'Dist::Zilla::Role::Git::Repo';
 
 # -- attributes
 
@@ -52,14 +53,46 @@ has branch  => ( ro, isa => Str, default => 'build/%b', required => 1 );
 has release_branch  => ( ro, isa => Str, required => 0 );
 has message => ( ro, isa => Str, default => 'Build results of %h (on %b)', required => 1 );
 has release_message => ( ro, isa => Str, lazy => 1, builder => '_build_release_message' );
-has build_root => ( rw, coerce => 1, isa => Dir );
-has _git => (rw, weak_ref => 1);
+has build_root => ( rw, coerce => 1, isa => Path );
+
+has _source_branch => (
+    is      => 'ro',
+    isa     => Str,
+    lazy    => 1,
+    init_arg=> undef,
+    default => sub {
+        ($_[0]->git->name_rev( '--name-only', 'HEAD' ))[0];
+    },
+);
+
+has multiple_inheritance => (
+    is      => 'ro',
+    isa     => Bool,
+    default => 0,
+);
 
 # -- attribute builders
 
 sub _build_release_message { return shift->message; }
 
 # -- role implementation
+
+around dump_config => sub
+{
+    my $orig = shift;
+    my $self = shift;
+
+    my $config = $self->$orig;
+
+    $config->{+__PACKAGE__} = {
+        (map { $_ => $self->$_ } qw(branch release_branch message release_message)),
+        multiple_inheritance => $self->multiple_inheritance ? 1 : 0,
+        # only report relative to dist root to avoid leaking private info
+        build_root => path($self->build_root)->relative($self->zilla->root),
+    };
+
+    return $config;
+};
 
 sub after_build {
     my ( $self, $args) = @_;
@@ -82,12 +115,20 @@ sub _commit_build {
 
     return unless $branch;
 
-    my $tmp_dir = File::Temp->newdir( CLEANUP => 1) ;
-    my $src     = Git::Wrapper->new( $self->repo_root );
-    $self->_git($src);
+    my $dir = Path::Tiny->tempdir( CLEANUP => 1) ;
+    my $src = $self->git;
 
-    my $target_branch = _format_branch( $branch, $src );
-    my $dir           = $self->build_root;
+    my $target_branch = _format_branch( $branch, $self );
+
+    for my $file ( @{ $self->zilla->files } ) {
+        my ( $name, $content ) = ( $file->name, (Dist::Zilla->VERSION < 5
+                                                 ? $file->content
+                                                 : $file->encoded_content) );
+        my ( $outfile ) = $dir->child( $name );
+        $outfile->parent->mkpath();
+        $outfile->spew_raw( $content );
+        chmod $file->mode, "$outfile" or die "couldn't chmod $outfile: $!";
+    }
 
     # returns the sha1 of the created tree object
     my $tree = $self->_create_tree($src, $dir);
@@ -102,9 +143,12 @@ sub _commit_build {
         return;
     }
 
-    my @parents = grep {
-        eval { $src->rev_parse({ 'q' => 1, 'verify'=>1}, $_ ) }
-    } $target_branch;
+    my @parents = (
+        ( $self->_source_branch ) x $self->multiple_inheritance,
+        grep {
+            eval { $src->rev_parse({ 'q' => 1, 'verify'=>1}, $_ ) }
+        } $target_branch
+    );
 
     ### @parents
 
@@ -160,6 +204,7 @@ In your F<dist.ini>:
 	; these are the defaults
     branch = build/%b
     message = Build results of %h (on %b)
+    multiple_inheritance = 0
 
 =head1 DESCRIPTION
 
@@ -209,7 +254,16 @@ This option supports five formatting codes:
 
 =item * release_message - L<String::Formatter> string for what
 commit message to use when committing the results of the release.
+
 Defaults to the same as C<message>.
+
+=item * multiple_inheritance - Indicates whether the commit containing
+the build results should have the source commit as a parent.
+
+If false (the default), the build branch will be completely separate
+from the regular code branches.  If set to a true value, commits on a
+build branch will have two parents: the previous build commit and the
+source commit from which the build was generated.
 
 =back
 

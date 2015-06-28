@@ -1,10 +1,21 @@
 package Dist::Zilla::Plugin::Git::GatherDir;
 # ABSTRACT: gather all tracked files in a Git working directory
+
+
 use Moose;
-use Moose::Autobox;
-use MooseX::Types::Path::Class qw(Dir File);
-with 'Dist::Zilla::Role::Git::Repo';
-extends 'Dist::Zilla::Plugin::GatherDir';
+extends 'Dist::Zilla::Plugin::GatherDir' => { -version => 4.200016 }; # exclude_match
+
+=head1 SYNOPSIS
+
+In your F<dist.ini>:
+
+    [Git::GatherDir]
+    root = .                     ; this is the default
+    prefix =                     ; this is the default
+    include_dotfiles = 0         ; this is the default
+    include_untracked = 0        ; this is the default
+    exclude_filename = dir/skip  ; there is no default
+    exclude_match = ^local_      ; there is no default
 
 =head1 DESCRIPTION
 
@@ -33,12 +44,8 @@ files into a subdir of your dist, you might write:
 
 =cut
 
-use Git::Wrapper;
-use File::Find::Rule;
-use File::HomeDir;
-use File::Spec;
-use List::AllUtils qw(uniq);
-use Path::Class;
+use List::MoreUtils qw(uniq);
+use MooseX::Types::Moose qw(Bool);
 
 use namespace::autoclean;
 
@@ -46,7 +53,10 @@ use namespace::autoclean;
 
 This is the directory in which to look for files.  If not given, it defaults to
 the dist root -- generally, the place where your F<dist.ini> or other
-configuration file is located.
+configuration file is located.  It may begin with C<~> (or C<~user>)
+to mean your (or some other user's) home directory.  If a relative path,
+it's relative to the dist root.  It does not need to be the root of a
+Git repository, but it must be inside a repository.
 
 =attr prefix
 
@@ -60,11 +70,38 @@ both for files and for directories relative to the C<root>.
 
 In almost all cases, the default value (false) is correct.
 
+=attr include_untracked
+
+By default, files not tracked by Git will not be gathered.  If this is
+set to a true value, then untracked files not covered by a Git ignore
+pattern (i.e. those reported by C<git ls-files -o --exclude-standard>)
+are also gathered (and you'll probably want to use
+L<Git::Check|Dist::Zilla::Plugin::Git::Check> to ensure all files are
+checked in before a release).
+
+C<include_untracked> requires at least Git 1.5.4, but you should
+probably not use it if your Git is older than 1.6.5.2.  Versions
+before that would not list files matched by your F<.gitignore>, even
+if they were already being tracked by Git (which means they will not
+be gathered, even though they should be).  Whether that is a problem
+depends on the contents of your exclude files (including the global
+one, if any).
+
 =attr follow_symlinks
 
-By default, directories that are symlinks will not be followed. Note on the
-other hand that in all followed directories, files which are symlinks are
-always gathered.
+Git::GatherDir does not honor GatherDir's
+L<follow_symlinks|Dist::Zilla::Plugin::GatherDir/follow_symlinks>
+option.  While the attribute exists (because Git::GatherDir is a
+subclass), setting it has no effect.
+
+Directories that are symlinks will not be gathered.  Instead, you'll
+get a message saying C<WARNING: %s is symlink to directory, skipping it>.
+To suppress the warning, add that directory to C<exclude_filename> or
+C<exclude_match>.  To gather the files in the symlinked directory, use
+a second instance of GatherDir or Git::GatherDir with appropriate
+C<root> and C<prefix> options.
+
+Files which are symlinks are always gathered.
 
 =attr exclude_filename
 
@@ -79,44 +116,88 @@ multiple times to specify multiple patterns to exclude.
 
 =cut
 
+has include_untracked => (
+  is  => 'ro',
+  isa => Bool,
+  default => 0,
+);
+
+around dump_config => sub
+{
+    my $orig = shift;
+    my $self = shift;
+
+    my $config = $self->$orig;
+
+    $config->{+__PACKAGE__} = {
+        include_untracked => $self->include_untracked ? 1 : 0,
+    };
+
+    return $config;
+};
 
 override gather_files => sub {
   my ($self) = @_;
 
+  require Git::Wrapper;
+  require Path::Tiny;
+
   my $root = "" . $self->root;
-  $root =~ s{^~([\\/])}{File::HomeDir->my_home . $1}e;
-  $root = Path::Class::dir($root);
+  # Convert ~ to home directory:
+  if ($root =~ /^~/) {
+    require File::HomeDir;
+    File::HomeDir->VERSION(0.81);
 
-  my $git = Git::Wrapper->new($root);
+    $root =~ s/^~(\w+)/ File::HomeDir->users_home("$1") /e;
+    $root =~ s/^~/      File::HomeDir->my_home /e;
+  } # end if $root begins with ~
+  $root = Path::Tiny::path($root)->absolute($self->zilla->root->absolute);
 
-  my @files;
-  FILE: for my $filename (uniq $git->ls_files) {
+  # Prepare to gather files
+  my $git = Git::Wrapper->new($root->stringify);
 
-    my $file = file($filename)->relative($root);
+  my @opts;
+  @opts = qw(--cached --others --exclude-standard) if $self->include_untracked;
 
+  my $exclude_regex = qr/\000/;
+  $exclude_regex = qr/$exclude_regex|$_/
+    for (@{ $self->exclude_match });
+
+  my %is_excluded = map {; $_ => 1 } @{ $self->exclude_filename };
+
+  my $prefix = $self->prefix;
+
+  # Loop over files reported by git ls-files
+  for my $filename (uniq $git->ls_files(@opts)) {
+    # $file is a Path::Tiny relative to $root
+    my $file = Path::Tiny::path($filename);
+
+    $self->log_debug("considering $file");
+
+    # Exclusion tests
     unless ($self->include_dotfiles) {
-      next FILE if $file->basename =~ qr/^\./;
-      next FILE if grep { /^\.[^.]/ } $file->dir->dir_list;
+      next if grep { /^\./ } split q{/}, $file->stringify;
     }
 
-    my $exclude_regex = qr/\000/;
-    $exclude_regex = qr/$exclude_regex|$_/
-      for ($self->exclude_match->flatten);
-    # \b\Q$_\E\b should also handle the `eq` check
-    $exclude_regex = qr/$exclude_regex|\b\Q$_\E\b/
-      for ($self->exclude_filename->flatten);
     next if $file =~ $exclude_regex;
+    next if $is_excluded{ $file };
 
-    push @files, $self->_file_from_filename($filename);
-  }
+    # DZil can't gather directory symlinks
+    my $path = $root->child($file);
 
-  for my $file (@files) {
-    (my $newname = $file->name) =~ s{\A\Q$root\E[\\/]}{}g;
-    $newname = File::Spec->catdir($self->prefix, $newname) if $self->prefix;
-    $newname = Path::Class::dir($newname)->as_foreign('Unix')->stringify;
+    if (-d $path) {
+      $self->log("WARNING: $file is symlink to directory, skipping it");
+      next;
+    }
 
-    $file->name($newname);
-    $self->add_file($file);
+    # Gather the file
+    my $fileobj = $self->_file_from_filename($path->stringify);
+
+    $file = Path::Tiny::path($prefix, $file) if length $prefix;
+
+    $fileobj->name($file->stringify);
+    $self->add_file($fileobj);
+    $self->log_debug("gathered $file");
   }
 
   return;
