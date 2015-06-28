@@ -85,9 +85,10 @@ around dump_config => sub
     my $config = $self->$orig;
 
     $config->{+__PACKAGE__} = {
-        (map { $_ => $self->$_ }
-            qw(branch release_branch message release_message build_root)),
+        (map { $_ => $self->$_ } qw(branch release_branch message release_message)),
         multiple_inheritance => $self->multiple_inheritance ? 1 : 0,
+        # only report relative to dist root to avoid leaking private info
+        build_root => path($self->build_root)->relative($self->zilla->root),
     };
 
     return $config;

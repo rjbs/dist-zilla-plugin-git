@@ -59,7 +59,8 @@ around dump_config => sub
     my $config = $self->$orig;
 
     $config->{+__PACKAGE__} = {
-        repo_root => $self->repo_root,
+        # only report relative to dist root to avoid leaking private info
+        repo_root => path($self->repo_root)->relative($self->zilla->root),
     };
 
     return $config;
